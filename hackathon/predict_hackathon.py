@@ -15,6 +15,41 @@ from hackathon_api import Datapoint, Protein, SmallMolecule
 # ---- Participants should modify these four functions ----------------------
 # ---------------------------------------------------------------------------
 
+
+def find_cdr_h3(sequence: str) -> range:
+    """Approximate CDR-H3 detection based on conserved framework motifs."""
+    # Look for conserved motifs: "W" (Trp) at start of FR4, "W" or "F" in FR3
+    # CDR-H3 is usually between ~90-100 (IMGT numbering)
+    
+    # Search for FR3 tryptophan (conserved at ~position 95-105 in unaligned)
+    fr3_trp = -1
+    for i in range(len(sequence) - 5):
+        if sequence[i] == "W" and "G" in sequence[i+1:i+5]:  # WGxG motif
+            fr3_trp = i
+            break
+
+    # Start of FR4: conserved "W" at position ~110-120
+    fr4_start = -1
+    for i in range(fr3_trp + 5, len(sequence)):
+        if sequence[i] == "W":
+            fr4_start = i
+            break
+
+    if fr3_trp != -1 and fr4_start != -1:
+        # CDR-H3 is between FR3 and FR4
+        start = fr3_trp + 5
+        end = fr4_start - 5
+        return range(max(start, 90), min(end, 110))
+    
+    # Fallback
+    return range(95, 105)
+
+def find_cdr_l3(sequence: str) -> range:
+    """Simple L3 detection."""
+    # Look for conserved "Q" or "L" motifs
+    return range(85, 95)  # Approximate
+
+    
 def prepare_protein_complex(datapoint_id: str, proteins: List[Protein], input_dict: dict, msa_dir: Optional[Path] = None) -> List[tuple[dict, List[str]]]:
     """
     Prepare input dict and CLI args for a protein complex prediction.
@@ -45,9 +80,66 @@ def prepare_protein_complex(datapoint_id: str, proteins: List[Protein], input_di
     # will add contact constraints to the input_dict
 
     # Example: predict 5 structures
-    cli_args = ["--diffusion_samples", "5"]
-    return [(input_dict, cli_args)]
+    # cli_args = ["--diffusion_samples", "5"]
 
+
+    # more configs:
+    configs=list()
+    # Config 1: Default (5 samples) - already used
+    # configs.append((input_dict, ["--diffusion_samples", "5"]))
+    
+    # Config 2: increase temperature and recycling steps
+    # configs.append((input_dict, ["--diffusion_samples", "5","--step_scale","1","--recycling_steps", "5"]))
+    
+    # Config 3: Use inference potentials
+    # configs.append((input_dict, ["--diffusion_samples", "5", "--use_potentials"]))
+    
+
+    # extract protein chains:
+
+    h_chain = next(p for p in proteins if p.id == "H")
+    l_chain = next(p for p in proteins if p.id == "L")
+    a_chain = next(p for p in proteins if p.id == "A")
+    
+    h3_range = find_cdr_h3(h_chain.sequence)
+    l3_range = find_cdr_l3(l_chain.sequence)
+    
+    # Sample a residue from CDR-H3 and CDR-L3
+    h3_res = h3_range.start + 5  # middle of H3
+    l3_res = l3_range.start + 3  # middle of L3
+    
+    # sample surface position from the antigen
+    # surface_positions = get_surface_residues(antigen.sequence)[:4]
+    
+    # New Configs 2-3-4: Biologically informed contact constraints
+    modified_dict = input_dict.copy()
+    modified_dict["constraints"] = [
+        {
+            "contact": {
+                "token1": ["H", h3_res],   # CDR-H3
+                "token2": ["A", 50],       # Antigen (could also scan)
+                "distance": 8.0,           # Expected interface distance
+                "std": 1.5                 # Tight constraint
+            }
+        },
+        {
+            "contact": {
+                "token1": ["L", l3_res],   # CDR-L3
+                "token2": ["A", 50],
+                "distance": 8.0,
+                "std": 1.5
+            }
+        }
+    ]
+    configs.append((modified_dict, ["--diffusion_samples", "5"]))
+    # increase temperature
+    configs.append((modified_dict, ["--diffusion_samples", "5","--step_scale","1","--recycling_steps", "5"]))
+    # use inference potentials
+    configs.append((modified_dict, ["--diffusion_samples", "5", "--use_potentials"]))
+    
+    return configs
+
+    
 def prepare_protein_ligand(datapoint_id: str, protein: Protein, ligands: list[SmallMolecule], input_dict: dict, msa_dir: Optional[Path] = None) -> List[tuple[dict, List[str]]]:
     """
     Prepare input dict and CLI args for a protein-ligand prediction.
@@ -91,15 +183,36 @@ def post_process_protein_complex(datapoint: Datapoint, input_dicts: List[dict[st
     Returns: 
         Sorted pdb file paths that should be used as your submission.
     """
-    # Collect all PDBs from all configurations
-    all_pdbs = []
+    pdb_scores = []
+    
     for prediction_dir in prediction_dirs:
         config_pdbs = sorted(prediction_dir.glob(f"{datapoint.datapoint_id}_config_*_model_*.pdb"))
-        all_pdbs.extend(config_pdbs)
-
-    # Sort all PDBs and return their paths
-    all_pdbs = sorted(all_pdbs)
-    return all_pdbs
+        for pdb_path in config_pdbs:
+            confidence_path = pdb_path.parent / f"confidence_{pdb_path.stem}.json"
+            score = 0.0
+            
+            if confidence_path.exists():
+                with open(confidence_path) as f:
+                    conf_data = json.load(f)
+                    iptm = conf_data.get("root", {}).get("iptm", 0)
+                    ptm = conf_data.get("root", {}).get("ptm", 0)
+                    plddt_mean = conf_data.get("plddt", {}).get("mean", 0)
+                    
+                    # Weighted ensemble score
+                    score = (
+                        0.5 * iptm +        # interface quality
+                        0.3 * (ptm / 100) + # overall fold
+                        0.2 * (plddt_mean / 100)  # local confidence
+                    )
+            else:
+                score = 0.0
+            
+            pdb_scores.append((score, pdb_path))
+    
+    # Sort by composite score
+    pdb_scores.sort(key=lambda x: x[0], reverse=True)
+    
+    return [path for score, path in pdb_scores]
 
 def post_process_protein_ligand(datapoint: Datapoint, input_dicts: List[dict[str, Any]], cli_args_list: List[list[str]], prediction_dirs: List[Path]) -> List[Path]:
     """
