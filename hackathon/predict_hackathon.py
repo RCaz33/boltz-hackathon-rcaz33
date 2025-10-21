@@ -49,6 +49,20 @@ def find_cdr_l3(sequence: str) -> range:
     # Look for conserved "Q" or "L" motifs
     return range(85, 95)  # Approximate
 
+def get_surface_residues(sequence: str) -> List[int]:
+    """Approximate surface residues based on hydrophilicity and flexibility."""
+    # Simple hydrophilic residues that are often on surface
+    hydrophilic = set(['R', 'K', 'D', 'E', 'N', 'Q', 'S', 'T', 'Y'])
+    surface_positions = []
+    
+    for i, aa in enumerate(sequence):
+        if aa in hydrophilic and 10 < i < len(sequence) - 10:  # avoid termini
+            # Sample every 5th surface residue to reduce redundancy
+            if len(surface_positions) == 0 or i - surface_positions[-1] > 5:
+                surface_positions.append(i + 1)  # 1-indexed
+    
+    return surface_positions[:5]  # limit to 5 positions
+
     
 def prepare_protein_complex(datapoint_id: str, proteins: List[Protein], input_dict: dict, msa_dir: Optional[Path] = None) -> List[tuple[dict, List[str]]]:
     """
@@ -109,33 +123,31 @@ def prepare_protein_complex(datapoint_id: str, proteins: List[Protein], input_di
     l3_res = l3_range.start + 3  # middle of L3
     
     # sample surface position from the antigen
-    # surface_positions = get_surface_residues(antigen.sequence)[:4]
+    surface_positions = get_surface_residues(antigen.sequence)[:4]
     
-    # New Configs 2-3-4: Biologically informed contact constraints
-    modified_dict = input_dict.copy()
-    modified_dict["constraints"] = [
-        {
-            "contact": {
-                "token1": ["H", h3_res],   # CDR-H3
-                "token2": ["A", 50],       # Antigen (could also scan)
-                "distance": 8.0,           # Expected interface distance
-                "std": 1.5                 # Tight constraint
+    # New NEWEST Configs 2-3-4: CDR region constraints to heavy chain (most robust)
+
+    for pos in antigen_positions:
+        modified_dict = input_dict.copy()
+        modified_dict["constraints"] = [
+            {
+                "contact": {
+                    "token1": ["H", h3_res],
+                    "token2": ["A", pos],
+                    "distance": 4.0,
+                    "std": 1.5
+                }
+            },
+            {
+                "contact": {
+                    "token1": ["L", l3_res],
+                    "token2": ["A", pos],
+                    "distance": 4.0,
+                    "std": 1.5
+                }
             }
-        },
-        {
-            "contact": {
-                "token1": ["L", l3_res],   # CDR-L3
-                "token2": ["A", 50],
-                "distance": 8.0,
-                "std": 1.5
-            }
-        }
-    ]
-    configs.append((modified_dict, ["--diffusion_samples", "5"]))
-    # increase temperature
-    configs.append((modified_dict, ["--diffusion_samples", "5","--step_scale","1","--recycling_steps", "5"]))
-    # use inference potentials
-    configs.append((modified_dict, ["--diffusion_samples", "5", "--use_potentials"]))
+        ]
+        configs.append((modified_dict, ["--diffusion_samples", "3", "--step_scale", "1", "--recycling_steps", "5"]))
     
     return configs
 
