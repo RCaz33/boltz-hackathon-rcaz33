@@ -127,7 +127,7 @@ def prepare_protein_complex(datapoint_id: str, proteins: List[Protein], input_di
     
     # New NEWEST Configs 2-3-4: CDR region constraints to heavy chain (most robust)
 
-    for pos in antigen_positions:
+    for pos in surface_positions:
         modified_dict = input_dict.copy()
         modified_dict["constraints"] = [
             {
